@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zoho Connect · PoC Builder</title>
+  <link rel="stylesheet" href="css/app.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232b5be0'/><text x='50%' y='54%' dominant-baseline='middle' text-anchor='middle' fill='white' font-size='16' font-weight='700' font-family='system-ui'>ZC</text></svg>" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- Topbar -->
+    <header class="topbar">
+      <div class="topbar-brand">
+        <div class="brand-mark">ZC</div>
+        <div>
+          <div class="brand-name">PoC Builder</div>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="topbar-dc" id="topbar-dc">● India DC</div>
+      </div>
+    </header>
+
+    <div class="main">
+
+      <!-- Sidebar -->
+      <nav class="sidebar">
+        <div class="sidebar-section">
+          <div class="sidebar-label">Workspace</div>
+          <button class="nav-item active" data-view="new" onclick="App.showView('new', this)">
+            <span class="nav-icon">+</span> New PoC
+          </button>
+          <button class="nav-item" data-view="history" onclick="App.showView('history', this)">
+            <span class="nav-icon">◷</span> History
+            <span class="nav-badge" id="history-badge">0</span>
+          </button>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-label">Config</div>
+          <button class="nav-item" data-view="settings" onclick="App.showView('settings', this)">
+            <span class="nav-icon">⚙</span> Settings
+          </button>
+        </div>
+      </nav>
+
+      <!-- Content area -->
+      <main class="content" id="content-area">
+        <!-- Injected by JS -->
+      </main>
+
+    </div>
+  </div>
+
+  <script src="js/storage.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/generate.js"></script>
+  <script src="js/deploy.js"></script>
+  <script src="js/views.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
