@@ -1,286 +1,367 @@
-/**
- * app.js
- * Main application controller.
- * Coordinates views, state, and module calls.
- */
-
 const App = (() => {
+  let step = 0;
+  let checks = [false,false,false,false,false];
+  let content = null;
+  let prospect = {};
+  let tone = 'formal';
+  let timerHandle = null;
+  let etaTotal = 0;
+  let deployStart = 0;
 
-  /* ── State ───────────────────────────────────────────────── */
-  let currentStep  = 0;
-  let checkStates  = [false, false, false, false, false];
-  let generatedContent = null;
-  let prospect     = {};
-  let timerHandle  = null;
-
-  /* ── Boot ────────────────────────────────────────────────── */
+  /* ── Boot ── */
   function init() {
     showView('new', document.querySelector('.nav-item[data-view="new"]'));
-    refreshHistoryBadge();
-    // Restore DC selector from saved settings
-    const saved = Storage.getSettings();
-    if (saved.dc) {
-      const el = document.getElementById('s-dc');
-      if (el) el.value = saved.dc;
-    }
-    // Update topbar DC label
+    refreshBadge();
     updateDcLabel();
   }
 
   function updateDcLabel() {
     const { dc } = Storage.getCreds();
-    const label = { in:'India DC', com:'US DC', eu:'Europe DC', 'com.au':'AU DC', jp:'Japan DC', ca:'Canada DC' };
-    const el = document.getElementById('topbar-dc');
-    if (el) el.textContent = '● ' + (label[dc] || 'Connect');
+    const labels = { in:'India DC', com:'US DC', eu:'Europe DC', 'com.au':'AU DC', jp:'Japan DC' };
+    const el = document.getElementById('dc-label');
+    if (el) el.textContent = labels[dc] || 'India DC';
   }
 
-  /* ── Navigation ──────────────────────────────────────────── */
+  /* ── View routing ── */
   function showView(id, navEl) {
     const area = document.getElementById('content-area');
-    if (id === 'new') {
-      area.innerHTML = Views.newPoc();
-      renderStep(0);
-    } else if (id === 'history') {
-      area.innerHTML = Views.history(Storage.getHistory());
-    } else if (id === 'settings') {
-      area.innerHTML = Views.settings();
-      // Pre-fill saved non-sensitive values
-      const creds = Storage.getCreds();
-      if (creds.dc) { const el = document.getElementById('s-dc'); if (el) el.value = creds.dc; }
-    }
+    const html = id === 'new'      ? Views.step0()
+               : id === 'history'  ? Views.history(Storage.getHistory())
+               : id === 'settings' ? Views.settings()
+               : '';
+    setContent(html);
+    if (id === 'new') { step = 0; updateTopbarProgress(0); }
 
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    if (navEl) navEl.classList.add('active');
-    else {
-      const target = document.querySelector(`.nav-item[data-view="${id}"]`);
-      if (target) target.classList.add('active');
+    const target = navEl || document.querySelector(`.nav-item[data-view="${id}"]`);
+    if (target) target.classList.add('active');
+
+    // Pre-fill settings creds (non-sensitive)
+    if (id === 'settings') {
+      const c = Storage.getCreds();
+      const dc = document.getElementById('s-dc');
+      if (dc && c.dc) dc.value = c.dc;
     }
   }
 
-  /* ── Step management ─────────────────────────────────────── */
+  function setContent(html) {
+    const area = document.getElementById('content-area');
+    area.style.opacity = '0';
+    area.style.transform = 'translateY(8px)';
+    setTimeout(() => {
+      area.innerHTML = html;
+      area.style.transition = 'opacity .3s ease, transform .3s ease';
+      area.style.opacity = '1';
+      area.style.transform = 'translateY(0)';
+    }, 80);
+  }
+
+  /* ── Steps ── */
   function goStep(n) {
     if (n === 1) {
       const company = val('f-company');
-      if (!company) { alert('Please enter a company name.'); return; }
-      prospect.company  = company;
-      prospect.industry = val('f-industry');
-      prospect.location = val('f-location');
-      prospect.size     = val('f-size');
-      prospect.usecase  = val('f-usecase');
-      prospect.depts    = val('f-depts');
-      prospect.email    = val('f-email');
+      if (!company) { shake('f-company'); return; }
+      prospect = {
+        company, industry: val('f-industry'), location: val('f-location'),
+        size: val('f-size'), usecase: val('f-usecase'), depts: val('f-depts'), tone,
+      };
     }
-    if (n === 2) {
-      prospect.scopeId = val('f-scopeid');
-    }
-    renderStep(n);
-    currentStep = n;
-  }
-
-  function renderStep(n) {
-    const container = document.getElementById('steps-container');
-    if (!container) return;
-    updateProgress(n);
-
-    if (n === 0) { container.innerHTML = Views.step0(); return; }
-    if (n === 1) { container.innerHTML = Views.step1(prospect.company || ''); restoreChecks(); return; }
-    if (n === 2) {
-      if (generatedContent) {
-        container.innerHTML = Views.step2_done(generatedContent);
-      } else {
-        container.innerHTML = Views.step2_idle(prospect.company || '');
-      }
-      return;
-    }
+    if (n === 2) { prospect.scopeId = val('f-scopeid'); }
     if (n === 3) {
-      container.innerHTML = Views.step3_idle(prospect.scopeId || '', prospect.company || '');
+      if (!content) { goStep(2); return; }
+      const eta = Deploy.estimateSeconds(content);
+      etaTotal = eta;
+      setContent(Views.step3Idle(prospect.scopeId, prospect.company, eta));
+      step = 3; updateTopbarProgress(3); return;
     }
+    step = n; updateTopbarProgress(n);
+    const html = n === 0 ? Views.step0()
+               : n === 1 ? Views.step1(prospect.company)
+               : n === 2 ? (content ? Views.step2Done(content) : Views.step2Idle(prospect.company, prospect.tone))
+               : '';
+    setContent(html);
+    if (n === 1) setTimeout(restoreChecks, 120);
   }
 
-  function updateProgress(n) {
-    for (let i = 0; i < 4; i++) {
-      const dot   = document.getElementById('pdot-' + i);
-      const label = document.getElementById('plabel-' + i);
-      if (!dot) continue;
-      dot.className   = 'prog-dot';
-      label.className = 'prog-label';
-      if (i < n)      { dot.classList.add('done');   dot.textContent = '✓'; label.classList.add('done'); }
-      else if (i === n){ dot.classList.add('active'); dot.textContent = i + 1; label.classList.add('active'); }
-      else             { dot.textContent = i + 1; }
-    }
+  /* ── Topbar progress ── */
+  function updateTopbarProgress(n) {
+    const bar = document.getElementById('topbar-progress');
+    if (!bar) return;
+    const labels = ['Prospect','Network','Generate','Deploy'];
+    bar.style.display = 'flex';
+    bar.innerHTML = labels.map((l,i) => {
+      const cls = i < n ? 'done' : i === n ? 'active' : '';
+      return `<div class="tp-step">
+        <div class="tp-dot ${cls}" title="${l}"></div>
+        ${i < labels.length-1 ? `<div class="tp-line ${i < n ? 'done':''}"></div>` : ''}
+      </div>`;
+    }).join('');
   }
 
-  /* ── Checklist ───────────────────────────────────────────── */
+  /* ── Tone ── */
+  function setTone(t, el) {
+    tone = t;
+    document.querySelectorAll('.tone-option').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+  }
+
+  /* ── Checklist ── */
   function toggleCheck(i) {
-    checkStates[i] = !checkStates[i];
+    checks[i] = !checks[i];
     const box = document.getElementById('chk-' + i);
+    const item = document.getElementById('ci-' + i);
     if (!box) return;
-    if (checkStates[i]) { box.classList.add('checked'); box.textContent = '✓'; }
-    else                { box.classList.remove('checked'); box.textContent = ''; }
+    if (checks[i]) { box.classList.add('checked'); box.textContent = '✓'; item?.classList.add('completed'); }
+    else           { box.classList.remove('checked'); box.textContent = ''; item?.classList.remove('completed'); }
   }
-
   function restoreChecks() {
-    checkStates.forEach((checked, i) => {
-      const box = document.getElementById('chk-' + i);
-      if (!box) return;
-      if (checked) { box.classList.add('checked'); box.textContent = '✓'; }
-    });
+    checks.forEach((c,i) => { if (c) toggleCheck(i); });
   }
 
-  /* ── Generate ────────────────────────────────────────────── */
+  /* ── Generate ── */
   async function startGenerate() {
-    const container = document.getElementById('steps-container');
-    container.innerHTML = Views.step2_loading();
-    updateProgress(2);
+    setContent(Views.step2Loading());
+    updateTopbarProgress(2);
+
+    // Set company name in preview topbar
+    const cpName = document.getElementById('cp-company-name');
+    if (cpName) cpName.textContent = `${prospect.company} Connect`;
+
+    const logEl = () => document.getElementById('gen-log');
+    const log = (msg, cls) => appendLog(logEl(), msg, cls);
     startTimer('gen-elapsed');
 
-    const logEl = document.getElementById('gen-log');
-    const log = (msg, cls) => appendLog(logEl, msg, cls);
+    const onPreview = (type, data) => updatePreview(type, data);
 
     try {
-      const content = await Generate.run(prospect, log);
-      generatedContent = content;
-      clearInterval(timerHandle);
-      log(`✓ ${content.groups.length} groups`, 'log-ok');
-      log(`✓ ${content.posts.length} posts`, 'log-ok');
-      log(`✓ Manual: "${content.manual.name}" (${content.manual.articles.length} articles)`, 'log-ok');
-      log(`✓ ${content.taskBoard.tasks.length} tasks`, 'log-ok');
-      log(`✓ ${content.events.length} events`, 'log-ok');
-      log('Generation complete.', 'log-ok');
-      await sleep(500);
-      container.innerHTML = Views.step2_done(content);
-    } catch (e) {
-      clearInterval(timerHandle);
-      log(`Error: ${e.message}`, 'log-err');
+      log('Building contextual prompt...', 'log-dim');
+      const result = await Generate.run(prospect, log, onPreview);
+      content = result;
+      clearTimer();
+      log(`✓ ${result.groups.length} groups · ${result.posts.length} posts · ${result.manual.articles.length} articles · ${result.taskBoard.tasks.length} tasks · ${result.events.length} events`, 'log-ok');
+      log('Content ready — review below.', 'log-ok');
+      await sleep(600);
+      setContent(Views.step2Done(content));
+    } catch(err) {
+      clearTimer();
+      log(`Error: ${err.message}`, 'log-err');
       log('Check your Anthropic API key in Settings.', 'log-dim');
     }
   }
 
-  function regenContent() {
-    generatedContent = null;
-    renderStep(2);
+  function updatePreview(type, data) {
+    if (type === 'groups') {
+      const list = document.getElementById('cp-group-list');
+      if (!list) return;
+      list.innerHTML = data.map(g =>
+        `<div class="cp-group-item filled"><div class="cp-group-dot"></div>${g.name}</div>`
+      ).join('');
+    }
+    if (type === 'posts') {
+      const main = document.getElementById('cp-main');
+      if (!main) return;
+      main.innerHTML = data.slice(0,3).map((p, i) => {
+        const initials = prospect.company?.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase() || 'ZC';
+        return `<div class="preview-card" style="animation-delay:${i*0.1}s">
+          <div class="preview-card-header">
+            <div class="preview-avatar">${initials}</div>
+            <div class="preview-name">${p.group}</div>
+            <div class="preview-time">now</div>
+          </div>
+          <div class="preview-text">${p.content.slice(0,90)}${p.content.length>90?'…':''}</div>
+          ${p.pinned ? '<span class="preview-tag" style="background:var(--gold-100);color:var(--gold-500)">📌 Pinned</span>' : ''}
+        </div>`;
+      }).join('');
+    }
+    if (type === 'manual') {
+      const main = document.getElementById('cp-main');
+      if (!main) return;
+      const existing = main.innerHTML;
+      main.innerHTML = existing + `<div class="preview-card" style="animation-delay:0.3s">
+        <div class="preview-card-header">
+          <div class="preview-avatar" style="background:linear-gradient(135deg,var(--gold-500),var(--gold-300))">☰</div>
+          <div class="preview-name">${data.name}</div>
+        </div>
+        <div class="preview-text">${data.articles.length} articles · ${data.description.slice(0,60)}…</div>
+      </div>`;
+    }
   }
 
+  function regenContent() { content = null; goStep(2); }
   function showGenTab(id, el) {
     ['groups','posts','manual','tasks','events'].forEach(t => {
-      const pane = document.getElementById('gentab-' + t);
-      if (pane) pane.style.display = t === id ? '' : 'none';
+      const p = document.getElementById('gentab-' + t);
+      if (p) p.style.display = t === id ? '' : 'none';
     });
     document.querySelectorAll('.ctab').forEach(t => t.classList.remove('active'));
     if (el) el.classList.add('active');
   }
 
-  /* ── Deploy ──────────────────────────────────────────────── */
+  /* ── Deploy ── */
   async function startDeploy() {
-    if (!generatedContent) { alert('Generate content first.'); return; }
-    const scopeId = prospect.scopeId;
-    if (!scopeId) { alert('Scope ID is missing. Go back to step 2.'); return; }
-
-    const container = document.getElementById('steps-container');
-    container.innerHTML = Views.step3_running();
-    updateProgress(3);
+    if (!content) return;
+    setContent(Views.step3Running());
+    updateTopbarProgress(3);
     startTimer('deploy-elapsed');
+    deployStart = Date.now();
 
-    const logEl = document.getElementById('deploy-log');
-    const log = (msg, cls) => appendLog(logEl, msg, cls);
+    const logEl = () => document.getElementById('deploy-log');
+    const log = (msg, cls) => appendLog(logEl(), msg, cls);
+
+    // ETA countdown
+    const etaEl = () => document.getElementById('deploy-eta-remaining');
+    const etaTick = setInterval(() => {
+      const elapsed = (Date.now() - deployStart) / 1000;
+      const left = Math.max(0, Math.round(etaTotal - elapsed));
+      const el = etaEl();
+      if (el) el.textContent = left > 0 ? `~${left}s remaining` : 'Finishing up...';
+    }, 1000);
 
     try {
-      const summary = await Deploy.run(generatedContent, scopeId, prospect.email, log);
-      clearInterval(timerHandle);
+      log(`Starting deploy for ${prospect.company}...`, 'log-info');
+      const summary = await Deploy.run(content, prospect.scopeId, log);
+      clearInterval(etaTick);
+      clearTimer();
       log('─────────────────────────────────', 'log-dim');
-      log(`PoC for ${prospect.company} is live.`, 'log-ok');
+      log(`PoC for ${prospect.company} is live ✓`, 'log-ok');
+
+      const health = Validate.healthScore(content, summary);
+      Storage.addRecord({ ...prospect, ...summary, manualName: content.manual?.name, articles: content.manual?.articles?.length });
+      refreshBadge();
+
       await sleep(600);
-
-      // Save to history
-      Storage.addRecord({
-        company:  prospect.company,
-        industry: prospect.industry,
-        scopeId:  scopeId,
-        email:    prospect.email,
-      });
-      refreshHistoryBadge();
-
       const { dc } = Storage.getCreds();
-      container.innerHTML = Views.step3_done(prospect, summary, dc || 'in');
-      updateProgress(4);
+      setContent(Views.step3Done(prospect, summary, health, dc || 'in'));
+      updateTopbarProgress(4);
 
-    } catch (e) {
-      clearInterval(timerHandle);
-      log(`Error: ${e.message}`, 'log-err');
-      if (e.message.includes('expired') || e.message.includes('token')) {
-        log('→ Go to Settings to refresh your OAuth token.', 'log-dim');
+      // Animate health score
+      setTimeout(() => animateHealth(health.score), 300);
+
+      // Sync cred display
+      setupCredSync();
+
+    } catch(err) {
+      clearInterval(etaTick); clearTimer();
+      log(`Error: ${err.message}`, 'log-err');
+      if (err.message.includes('token') || err.message.includes('expired')) {
+        log('→ Go to Settings to update your OAuth token.', 'log-dim');
       }
+      log('You can retry — completed steps will be skipped automatically.', 'log-info');
     }
   }
 
-  /* ── Settings ────────────────────────────────────────────── */
+  function animateHealth(target) {
+    const numEl = document.getElementById('health-num');
+    const barEl = document.getElementById('health-bar');
+    if (!numEl || !barEl) return;
+    let current = 0;
+    const step  = target / 50;
+    const tick  = setInterval(() => {
+      current = Math.min(current + step, target);
+      numEl.textContent = Math.round(current);
+      barEl.style.width = current + '%';
+      if (current >= target) clearInterval(tick);
+    }, 20);
+  }
+
+  function setupCredSync() {
+    const userEl = document.getElementById('ho-user');
+    const passEl = document.getElementById('ho-pass');
+    const userDisp = document.getElementById('cred-user-display');
+    const passDisp = document.getElementById('cred-pass-display');
+    if (userEl && userDisp) userEl.addEventListener('input', () => { userDisp.textContent = userEl.value || '—'; });
+    if (passEl && passDisp) passEl.addEventListener('input', () => { passDisp.textContent = passEl.value || '—'; });
+  }
+
+  /* ── PDF export ── */
+  function exportPDF() {
+    const { dc } = Storage.getCreds();
+    const slug   = prospect.company?.toLowerCase().replace(/\s+/g,'');
+    PDF.exportHandover({
+      company:    prospect.company,
+      industry:   prospect.industry,
+      usecase:    prospect.usecase,
+      networkUrl: `https://connect.zoho.${dc||'in'}/portal/${slug}`,
+      username:   document.getElementById('ho-user')?.value || '',
+      password:   document.getElementById('ho-pass')?.value || '',
+      groups:     (content?.groups || []).map(g => g.name),
+      posts:      content?.posts?.length,
+      manualName: content?.manual?.name,
+      articles:   content?.manual?.articles?.length,
+      tasks:      content?.taskBoard?.tasks?.length,
+      events:     content?.events?.length,
+    });
+  }
+
+  /* ── Clone / Duplicate ── */
+  function clonePoc(id) {
+    const rec = Storage.getHistory().find(r => r.id === id);
+    if (!rec) return;
+    prospect = { company: rec.company + ' (clone)', industry: rec.industry, location: rec.location || '', size: rec.size || '', usecase: rec.usecase || '', depts: rec.depts || '', tone: rec.tone || 'formal' };
+    tone = prospect.tone;
+    content = null;
+    showView('new', document.querySelector('.nav-item[data-view="new"]'));
+    setTimeout(() => {
+      ['company','industry','location','size','usecase','depts'].forEach(k => {
+        const el = document.getElementById('f-' + k);
+        if (el) el.value = prospect[k] || '';
+      });
+    }, 200);
+  }
+
+  /* ── Settings ── */
   function saveSettings() {
-    const creds = {
-      anthropic:    document.getElementById('s-anthropic')?.value?.trim() || '',
-      zohoToken:    document.getElementById('s-token')?.value?.trim()     || '',
-      zohoRefresh:  document.getElementById('s-refresh')?.value?.trim()   || '',
-      clientId:     document.getElementById('s-clientid')?.value?.trim()  || '',
+    const token = document.getElementById('s-token')?.value?.trim();
+    const existing = sessionStorage.getItem('poc_zohoToken');
+    const expiry = token && token !== existing ? Date.now() + 55*60*1000 : sessionStorage.getItem('poc_tokenExpiry') || '';
+    Storage.saveCreds({
+      anthropic:    document.getElementById('s-anthropic')?.value?.trim()    || '',
+      zohoToken:    token,
+      zohoRefresh:  document.getElementById('s-refresh')?.value?.trim()      || '',
+      clientId:     document.getElementById('s-clientid')?.value?.trim()     || '',
       clientSecret: document.getElementById('s-clientsecret')?.value?.trim() || '',
       dc:           document.getElementById('s-dc')?.value || 'in',
-      tokenExpiry:  creds_expiry(),
-    };
-    Storage.saveCreds(creds);
-    Storage.saveSettings({ dc: creds.dc });
+      tokenExpiry:  expiry,
+    });
+    Storage.saveSettings({ dc: document.getElementById('s-dc')?.value || 'in' });
     updateDcLabel();
-
     const saved = document.getElementById('settings-saved');
     if (saved) { saved.style.display = 'block'; setTimeout(() => saved.style.display = 'none', 2000); }
   }
 
-  function creds_expiry() {
-    // If user just pasted a fresh token, set expiry to now + 55 min
-    const existing = sessionStorage.getItem('poc_token_expiry');
-    const token = document.getElementById('s-token')?.value?.trim();
-    const storedToken = sessionStorage.getItem('poc_zoho_token');
-    if (token && token !== storedToken) {
-      return Date.now() + 55 * 60 * 1000; // 55 min from now
-    }
-    return existing || '';
-  }
-
-  /* ── History ─────────────────────────────────────────────── */
+  /* ── History ── */
   function deleteRecord(id) {
     if (!confirm('Remove this PoC from history?')) return;
     Storage.deleteRecord(id);
     showView('history', null);
-    refreshHistoryBadge();
+    refreshBadge();
+  }
+  function refreshBadge() {
+    const n = Storage.getHistory().length;
+    const b = document.getElementById('history-badge');
+    if (!b) return;
+    b.textContent = n;
+    b.className   = n > 0 ? 'nav-badge' : 'nav-badge zero';
+    if (n > 0) { b.style.transform = 'scale(1.3)'; setTimeout(() => b.style.transform = '', 300); }
   }
 
-  function refreshHistoryBadge() {
-    const count = Storage.getHistory().length;
-    const badge = document.getElementById('history-badge');
-    if (!badge) return;
-    badge.textContent = count;
-    badge.className = count > 0 ? 'nav-badge' : 'nav-badge zero';
-  }
-
-  /* ── New PoC reset ───────────────────────────────────────── */
+  /* ── Reset ── */
   function startNew() {
-    generatedContent = null;
-    prospect = {};
-    checkStates = [false, false, false, false, false];
-    currentStep = 0;
+    content = null; prospect = {}; checks = [false,false,false,false,false]; step = 0; tone = 'formal';
     showView('new', document.querySelector('.nav-item[data-view="new"]'));
   }
 
-  /* ── Helpers ─────────────────────────────────────────────── */
-  function val(id) {
-    return document.getElementById(id)?.value?.trim() || '';
-  }
+  /* ── Helpers ── */
+  function val(id) { return document.getElementById(id)?.value?.trim() || ''; }
 
-  function appendLog(container, msg, cls = '') {
-    if (!container) return;
-    const now = new Date().toTimeString().slice(0, 8);
+  function appendLog(el, msg, cls='') {
+    if (!el) return;
+    const t = new Date().toTimeString().slice(0,8);
     const line = document.createElement('div');
     line.className = 'log-line';
-    line.innerHTML = `<span class="log-time">${now}</span><span class="${cls}">${msg}</span>`;
-    container.appendChild(line);
-    container.scrollTop = container.scrollHeight;
+    line.innerHTML = `<span class="log-time">${t}</span><span class="${cls}">${msg}</span>`;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
   }
 
   function startTimer(elId) {
@@ -291,21 +372,26 @@ const App = (() => {
       if (el) el.textContent = (++s) + 's';
     }, 1000);
   }
+  function clearTimer() { clearInterval(timerHandle); }
+
+  function shake(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.style.animation = 'none';
+    el.style.borderColor = 'var(--red)';
+    el.style.boxShadow = '0 0 0 3px rgba(192,57,43,.15)';
+    setTimeout(() => { el.style.borderColor = ''; el.style.boxShadow = ''; }, 2000);
+    el.focus();
+  }
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  /* ── Expose public API ───────────────────────────────────── */
   return {
-    init, showView, goStep,
-    toggleCheck,
+    init, showView, goStep, setTone, toggleCheck,
     startGenerate, regenContent, showGenTab,
-    startDeploy,
-    saveSettings,
-    deleteRecord,
-    startNew,
+    startDeploy, exportPDF,
+    clonePoc, deleteRecord, startNew, saveSettings,
   };
-
 })();
 
-// Boot
 document.addEventListener('DOMContentLoaded', App.init);
