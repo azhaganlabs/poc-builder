@@ -1,87 +1,72 @@
-/**
- * storage.js
- * Thin wrapper around localStorage for PoC history and settings.
- * Credentials are kept in sessionStorage only (cleared on tab close).
- */
-
 const Storage = (() => {
-
-  const HISTORY_KEY = 'poc_builder_history';
-  const SETTINGS_KEY = 'poc_builder_settings';
-
-  /* ── History ─────────────────────────────────────────────── */
+  const HISTORY_KEY  = 'poc_history_v2';
+  const SETTINGS_KEY = 'poc_settings_v2';
 
   function getHistory() {
-    try {
-      return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
-    } catch { return []; }
+    try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); }
+    catch { return []; }
   }
-
-  function saveHistory(records) {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(records));
+  function saveHistory(r) { localStorage.setItem(HISTORY_KEY, JSON.stringify(r)); }
+  function addRecord(rec) {
+    const h = getHistory();
+    h.unshift({ ...rec, id: Date.now(), createdAt: new Date().toISOString(), status: 'active' });
+    saveHistory(h);
+    return h;
   }
-
-  function addRecord(record) {
-    const history = getHistory();
-    history.unshift({ ...record, id: Date.now(), createdAt: new Date().toISOString() });
-    saveHistory(history);
-    return history;
+  function updateRecord(id, patch) {
+    const h = getHistory().map(r => r.id === id ? { ...r, ...patch } : r);
+    saveHistory(h); return h;
   }
-
   function deleteRecord(id) {
-    const filtered = getHistory().filter(r => r.id !== id);
-    saveHistory(filtered);
-    return filtered;
+    const h = getHistory().filter(r => r.id !== id);
+    saveHistory(h); return h;
   }
-
-  /* ── Settings (non-sensitive) ────────────────────────────── */
 
   function getSettings() {
-    try {
-      return JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
-    } catch { return {}; }
+    try { return JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'); }
+    catch { return {}; }
+  }
+  function saveSettings(s) {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ dc: s.dc }));
   }
 
-  function saveSettings(settings) {
-    // Never persist raw tokens to localStorage
-    const safe = { dc: settings.dc };
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(safe));
+  // Credentials — sessionStorage only
+  function saveCreds(c) {
+    ['anthropic','zohoToken','zohoRefresh','clientId','clientSecret','tokenExpiry','dc']
+      .forEach(k => sessionStorage.setItem('poc_' + k, c[k] || ''));
   }
-
-  /* ── Credentials (session only — cleared on tab close) ───── */
-
-  function saveCreds(creds) {
-    // Store tokens in sessionStorage only
-    sessionStorage.setItem('poc_anthropic', creds.anthropic || '');
-    sessionStorage.setItem('poc_zoho_token', creds.zohoToken || '');
-    sessionStorage.setItem('poc_zoho_refresh', creds.zohoRefresh || '');
-    sessionStorage.setItem('poc_client_id', creds.clientId || '');
-    sessionStorage.setItem('poc_client_secret', creds.clientSecret || '');
-    sessionStorage.setItem('poc_token_expiry', creds.tokenExpiry || '');
-  }
-
   function getCreds() {
     return {
-      anthropic:    sessionStorage.getItem('poc_anthropic') || '',
-      zohoToken:    sessionStorage.getItem('poc_zoho_token') || '',
-      zohoRefresh:  sessionStorage.getItem('poc_zoho_refresh') || '',
-      clientId:     sessionStorage.getItem('poc_client_id') || '',
-      clientSecret: sessionStorage.getItem('poc_client_secret') || '',
-      tokenExpiry:  sessionStorage.getItem('poc_token_expiry') || '',
-      dc:           getSettings().dc || 'in',
+      anthropic:    sessionStorage.getItem('poc_anthropic')    || '',
+      zohoToken:    sessionStorage.getItem('poc_zohoToken')    || '',
+      zohoRefresh:  sessionStorage.getItem('poc_zohoRefresh')  || '',
+      clientId:     sessionStorage.getItem('poc_clientId')     || '',
+      clientSecret: sessionStorage.getItem('poc_clientSecret') || '',
+      tokenExpiry:  sessionStorage.getItem('poc_tokenExpiry')  || '',
+      dc:           sessionStorage.getItem('poc_dc') || getSettings().dc || 'in',
     };
   }
-
-  function updateToken(newToken, expiresIn = 3600) {
-    sessionStorage.setItem('poc_zoho_token', newToken);
-    sessionStorage.setItem('poc_token_expiry', Date.now() + (expiresIn - 60) * 1000);
+  function updateToken(token, expiresIn = 3600) {
+    sessionStorage.setItem('poc_zohoToken',   token);
+    sessionStorage.setItem('poc_tokenExpiry', Date.now() + (expiresIn - 60) * 1000);
   }
-
   function isTokenExpired() {
-    const expiry = sessionStorage.getItem('poc_token_expiry');
-    if (!expiry) return false; // Unknown — assume valid
-    return Date.now() > parseInt(expiry, 10);
+    const e = sessionStorage.getItem('poc_tokenExpiry');
+    return e ? Date.now() > parseInt(e, 10) : false;
   }
 
-  return { getHistory, addRecord, deleteRecord, getSettings, saveSettings, saveCreds, getCreds, updateToken, isTokenExpired };
+  // Deploy manifest — resume partial runs
+  function saveManifest(scopeId, manifest) {
+    sessionStorage.setItem('poc_manifest_' + scopeId, JSON.stringify(manifest));
+  }
+  function getManifest(scopeId) {
+    try { return JSON.parse(sessionStorage.getItem('poc_manifest_' + scopeId) || 'null'); }
+    catch { return null; }
+  }
+  function clearManifest(scopeId) {
+    sessionStorage.removeItem('poc_manifest_' + scopeId);
+  }
+
+  return { getHistory, addRecord, updateRecord, deleteRecord, getSettings, saveSettings,
+           saveCreds, getCreds, updateToken, isTokenExpired, saveManifest, getManifest, clearManifest };
 })();

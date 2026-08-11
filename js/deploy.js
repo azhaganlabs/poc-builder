@@ -1,246 +1,215 @@
 /**
  * deploy.js
- * Pushes generated content to Zoho Connect via REST API.
- * Auto-refreshes OAuth token if expired before starting.
+ * State-tracked deployment with per-step retry and resume capability.
+ *
+ * Deploy manifest shape:
+ * { groupIds: {name→id}, postsDone: n, manualId, boardId, sectionIds: {name→id},
+ *   tasksDone: n, eventsDone: n, navDone: bool, steps: {groups,posts,manual,board,tasks,events,nav} }
  */
-
 const Deploy = (() => {
 
-  /**
-   * Main deploy runner.
-   * @param {object} content  - generated content from Generate.run()
-   * @param {string} scopeId  - Connect network scope ID
-   * @param {string} email    - prospect admin email
-   * @param {function} onLog  - logging callback(msg, cssClass)
-   * @returns {Promise<object>} summary of what was created
-   */
-  async function run(content, scopeId, email, onLog) {
-    const log = (msg, cls = '') => onLog(msg, cls);
+  // ETA: rough seconds per API item
+  const ETA_WEIGHTS = { group: 0.6, post: 0.7, article: 0.5, task: 0.5, event: 0.6, nav: 0.5 };
 
-    // Step 0 — get a valid token (auto-refreshes if needed)
-    log('Validating OAuth token...', 'log-dim');
-    const token = await Auth.getValidToken((msg) => log(msg, 'log-info'));
-    const base = Auth.connectBase();
-    const headers = { Authorization: `Zoho-oauthtoken ${token}` };
-
-    log(`Connected · ${base}`, 'log-dim');
-    log(`Target network: scopeID ${scopeId}`, 'log-dim');
-
-    const summary = { groups: [], posts: 0, manualId: null, boardId: null, tasks: 0, events: 0 };
-    const groupIds = {}; // name → id
-
-    // ── Groups ────────────────────────────────────────────────
-    log(`Creating ${content.groups.length} groups...`, 'log-info');
-    for (const g of content.groups) {
-      await sleep(350);
-      try {
-        const r = await api('POST', `${base}/addGroup`, headers, {
-          scopeID: scopeId,
-          name: g.name,
-          description: g.description,
-          type: g.visibility === 'private' ? 'private' : 'open',
-        });
-        const id = r?.addGroup?.groupID;
-        groupIds[g.name] = id;
-        summary.groups.push(g.name);
-        log(`✓ Group: "${g.name}"`, 'log-ok');
-      } catch (e) {
-        log(`⚠ Group "${g.name}" failed: ${e.message}`, 'log-err');
-      }
-    }
-
-    // ── Posts ─────────────────────────────────────────────────
-    log(`Seeding ${content.posts.length} posts...`, 'log-info');
-    const typeMap = { announcement: 2, question: 3, conversation: 1 };
-    for (const p of content.posts) {
-      await sleep(450);
-      const groupId = groupIds[p.group] || Object.values(groupIds)[0];
-      if (!groupId) { log(`⚠ No group ID for "${p.group}" — skipping post`, 'log-err'); continue; }
-      try {
-        const r = await api('POST', `${base}/v2/addStream`, headers, {
-          scopeID: scopeId,
-          groupID: groupId,
-          type: typeMap[p.type] ?? 1,
-          content: p.content,
-        });
-        const streamId = r?.addStream?.streamID;
-        summary.posts++;
-        log(`✓ Post → "${p.group}" [${p.type}]`, 'log-ok');
-
-        // Pin if requested
-        if (p.pinned && streamId) {
-          await sleep(200);
-          await api('POST', `${base}/pinPost`, headers, { scopeID: scopeId, streamID: streamId });
-          log(`  📌 Pinned`, 'log-dim');
-        }
-      } catch (e) {
-        log(`⚠ Post failed: ${e.message}`, 'log-err');
-      }
-    }
-
-    // ── Manual ────────────────────────────────────────────────
-    log(`Creating manual: "${content.manual.name}"...`, 'log-info');
-    await sleep(400);
-    try {
-      const r = await api('POST', `${base}/addPage`, headers, {
-        scopeID: scopeId,
-        name: content.manual.name,
-        description: content.manual.description,
-      });
-      summary.manualId = r?.addPage?.pageID;
-      log(`✓ Manual created`, 'log-ok');
-
-      // Articles — publish each as a chapter stub
-      for (const article of content.manual.articles) {
-        await sleep(350);
-        try {
-          await api('POST', `${base}/publishArticle`, headers, {
-            scopeID: scopeId,
-            pageID: summary.manualId,
-            title: article.title,
-            content: `<p>${article.summary}</p>`,
-          });
-          log(`  ✓ Article: "${article.title}"`, 'log-ok');
-        } catch (e) {
-          log(`  ⚠ Article "${article.title}": ${e.message}`, 'log-err');
-        }
-      }
-    } catch (e) {
-      log(`⚠ Manual failed: ${e.message}`, 'log-err');
-    }
-
-    // ── Task board ────────────────────────────────────────────
-    log(`Creating task board: "${content.taskBoard.name}"...`, 'log-info');
-    await sleep(400);
-    try {
-      const r = await api('POST', `${base}/addBoard`, headers, {
-        scopeID: scopeId,
-        name: content.taskBoard.name,
-      });
-      summary.boardId = r?.addBoard?.boardID;
-      log(`✓ Board created`, 'log-ok');
-
-      // Sections
-      const sectionIds = {};
-      for (const sec of content.taskBoard.sections) {
-        await sleep(300);
-        try {
-          const sr = await api('POST', `${base}/addBoardSection`, headers, {
-            scopeID: scopeId,
-            boardID: summary.boardId,
-            name: sec,
-          });
-          sectionIds[sec] = sr?.addBoardSection?.sectionID;
-          log(`  ✓ Section: "${sec}"`, 'log-ok');
-        } catch (e) {
-          log(`  ⚠ Section "${sec}": ${e.message}`, 'log-err');
-        }
-      }
-
-      // Tasks
-      for (const task of content.taskBoard.tasks) {
-        await sleep(320);
-        const sectionId = sectionIds[task.section] || Object.values(sectionIds)[0];
-        try {
-          await api('POST', `${base}/addTask`, headers, {
-            scopeID: scopeId,
-            boardID: summary.boardId,
-            sectionID: sectionId,
-            name: task.title,
-            description: task.description,
-          });
-          summary.tasks++;
-          log(`  ✓ Task: "${task.title}"`, 'log-ok');
-        } catch (e) {
-          log(`  ⚠ Task "${task.title}": ${e.message}`, 'log-err');
-        }
-      }
-    } catch (e) {
-      log(`⚠ Task board failed: ${e.message}`, 'log-err');
-    }
-
-    // ── Events ────────────────────────────────────────────────
-    log(`Creating ${content.events.length} events...`, 'log-info');
-    const now = Date.now();
-    for (let i = 0; i < content.events.length; i++) {
-      const ev = content.events[i];
-      await sleep(380);
-      const startMs = now + (i + 1) * 7 * 24 * 60 * 60 * 1000;
-      const endMs   = startMs + 2 * 60 * 60 * 1000;
-      try {
-        await api('POST', `${base}/addEvent`, headers, {
-          scopeID: scopeId,
-          title: ev.title,
-          description: ev.description,
-          startTime: startMs,
-          endTime: endMs,
-        });
-        summary.events++;
-        log(`✓ Event: "${ev.title}"`, 'log-ok');
-      } catch (e) {
-        log(`⚠ Event "${ev.title}": ${e.message}`, 'log-err');
-      }
-    }
-
-    // ── Module order ──────────────────────────────────────────
-    log('Setting navigation order...', 'log-dim');
-    await sleep(350);
-    try {
-      await api('POST', `${base}/updateAppsOrder`, headers, {
-        scopeID: scopeId,
-        'appType[]': ['feeds', 'groups', 'task', 'manuals', 'events', 'blog'],
-      });
-      log('✓ Navigation configured', 'log-ok');
-    } catch (e) {
-      log(`⚠ Nav order: ${e.message}`, 'log-err');
-    }
-
-    // ── Invite prospect admin ─────────────────────────────────
-    if (email) {
-      log(`Inviting ${email} as admin...`, 'log-info');
-      await sleep(500);
-      try {
-        await api('POST', `${base}/v1/inviteUsersToNetwork`, headers, {
-          scopeID: scopeId,
-          emailIds: email,
-          memberType: 'MEMBER',
-        });
-        log(`✓ Admin invite sent to ${email}`, 'log-ok');
-      } catch (e) {
-        log(`⚠ Invite failed: ${e.message}`, 'log-err');
-      }
-    }
-
-    return summary;
+  function estimateSeconds(content) {
+    return Math.ceil(
+      (content.groups?.length || 0)           * ETA_WEIGHTS.group   +
+      (content.posts?.length || 0)            * ETA_WEIGHTS.post    +
+      (content.manual?.articles?.length || 0) * ETA_WEIGHTS.article +
+      (content.taskBoard?.tasks?.length || 0) * ETA_WEIGHTS.task    +
+      (content.events?.length || 0)           * ETA_WEIGHTS.event   +
+      ETA_WEIGHTS.nav + 2
+    );
   }
 
-  /* ── Helpers ─────────────────────────────────────────────── */
+  async function run(content, scopeId, onLog) {
+    const log = (msg, cls) => onLog(msg, cls);
 
-  async function api(method, url, headers, params = {}) {
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) {
-      if (Array.isArray(v)) v.forEach(item => qs.append(k, item));
-      else qs.append(k, v);
+    // Get valid token (auto-refreshes if expired)
+    log('Validating OAuth token...', 'log-dim');
+    const token = await Auth.getValidToken(onLog);
+    const base  = Auth.connectBase();
+    const h     = { Authorization: `Zoho-oauthtoken ${token}` };
+
+    // Load or create manifest for resume support
+    let mf = Storage.getManifest(scopeId) || {
+      groupIds: {}, postsDone: 0, manualId: null,
+      boardId: null, sectionIds: {}, tasksDone: 0,
+      eventsDone: 0, navDone: false,
+      steps: { groups: false, posts: false, manual: false, board: false, tasks: false, events: false, nav: false }
+    };
+
+    const saveState = () => Storage.saveManifest(scopeId, mf);
+
+    // ── Groups ────────────────────────────────────────────────
+    if (!mf.steps.groups) {
+      log(`Creating ${content.groups.length} groups...`, 'log-info');
+      for (const g of content.groups) {
+        if (mf.groupIds[g.name]) { log(`↷ Group "${g.name}" already created`, 'log-dim'); continue; }
+        const id = await retry(() => apiPost(`${base}/addGroup`, h, {
+          scopeID: scopeId, name: g.name, description: g.description,
+          type: g.visibility === 'private' ? 'private' : 'open',
+        }), 2, log, `Group "${g.name}"`);
+        mf.groupIds[g.name] = id?.addGroup?.groupID || null;
+        log(`✓ Group: "${g.name}"`, 'log-ok');
+        saveState();
+        await sleep(300);
+      }
+      mf.steps.groups = true; saveState();
+    } else { log('↷ Groups already created — skipping', 'log-dim'); }
+
+    // ── Posts ─────────────────────────────────────────────────
+    if (!mf.steps.posts) {
+      const typeMap = { announcement: 2, question: 3, conversation: 1 };
+      log(`Seeding ${content.posts.length} posts...`, 'log-info');
+      for (let i = mf.postsDone; i < content.posts.length; i++) {
+        const p = content.posts[i];
+        const gid = mf.groupIds[p.group] || Object.values(mf.groupIds)[0];
+        if (!gid) { log(`⚠ No group for "${p.group}"`, 'log-dim'); continue; }
+        const r = await retry(() => apiPost(`${base}/v2/addStream`, h, {
+          scopeID: scopeId, groupID: gid, type: typeMap[p.type] ?? 1, content: p.content,
+        }), 2, log, `Post in "${p.group}"`);
+        const sid = r?.addStream?.streamID;
+        if (p.pinned && sid) {
+          await sleep(200);
+          await retry(() => apiPost(`${base}/pinPost`, h, { scopeID: scopeId, streamID: sid }), 1, log, 'Pin');
+          log(`  📌 Pinned`, 'log-dim');
+        }
+        log(`✓ Post [${p.type}] → "${p.group}"`, 'log-ok');
+        mf.postsDone = i + 1; saveState();
+        await sleep(350);
+      }
+      mf.steps.posts = true; saveState();
+    } else { log('↷ Posts already seeded — skipping', 'log-dim'); }
+
+    // ── Manual ────────────────────────────────────────────────
+    if (!mf.steps.manual) {
+      log(`Creating manual: "${content.manual.name}"...`, 'log-info');
+      const mr = await retry(() => apiPost(`${base}/addPage`, h, {
+        scopeID: scopeId, name: content.manual.name, description: content.manual.description,
+      }), 2, log, 'Manual');
+      mf.manualId = mr?.addPage?.pageID;
+      log(`✓ Manual created`, 'log-ok');
+      saveState(); await sleep(300);
+
+      for (const a of content.manual.articles) {
+        if (!mf.manualId) break;
+        await retry(() => apiPost(`${base}/publishArticle`, h, {
+          scopeID: scopeId, pageID: mf.manualId, title: a.title, content: `<p>${a.summary}</p>`,
+        }), 2, log, `Article "${a.title}"`);
+        log(`  ✓ Article: "${a.title}"`, 'log-ok');
+        await sleep(300);
+      }
+      mf.steps.manual = true; saveState();
+    } else { log('↷ Manual already created — skipping', 'log-dim'); }
+
+    // ── Task board ────────────────────────────────────────────
+    if (!mf.steps.board) {
+      log(`Creating task board: "${content.taskBoard.name}"...`, 'log-info');
+      const br = await retry(() => apiPost(`${base}/addBoard`, h, {
+        scopeID: scopeId, name: content.taskBoard.name,
+      }), 2, log, 'Board');
+      mf.boardId = br?.addBoard?.boardID;
+      log(`✓ Board created`, 'log-ok');
+      saveState(); await sleep(300);
+
+      for (const sec of content.taskBoard.sections) {
+        const sr = await retry(() => apiPost(`${base}/addBoardSection`, h, {
+          scopeID: scopeId, boardID: mf.boardId, name: sec,
+        }), 2, log, `Section "${sec}"`);
+        mf.sectionIds[sec] = sr?.addBoardSection?.sectionID;
+        log(`  ✓ Section: "${sec}"`, 'log-ok');
+        saveState(); await sleep(250);
+      }
+      mf.steps.board = true; saveState();
+    } else { log('↷ Board already created — skipping', 'log-dim'); }
+
+    if (!mf.steps.tasks) {
+      const tasks = content.taskBoard.tasks;
+      for (let i = mf.tasksDone; i < tasks.length; i++) {
+        const t = tasks[i];
+        const sid = mf.sectionIds[t.section] || Object.values(mf.sectionIds)[0];
+        await retry(() => apiPost(`${base}/addTask`, h, {
+          scopeID: scopeId, boardID: mf.boardId, sectionID: sid, name: t.title, description: t.description,
+        }), 2, log, `Task "${t.title}"`);
+        log(`  ✓ Task: "${t.title}"`, 'log-ok');
+        mf.tasksDone = i + 1; saveState(); await sleep(280);
+      }
+      mf.steps.tasks = true; saveState();
+    } else { log('↷ Tasks already created — skipping', 'log-dim'); }
+
+    // ── Events ────────────────────────────────────────────────
+    if (!mf.steps.events) {
+      log(`Creating ${content.events.length} events...`, 'log-info');
+      const now = Date.now();
+      for (let i = mf.eventsDone; i < content.events.length; i++) {
+        const ev = content.events[i];
+        const start = now + (i + 1) * 7 * 24 * 3600 * 1000;
+        await retry(() => apiPost(`${base}/addEvent`, h, {
+          scopeID: scopeId, title: ev.title, description: ev.description,
+          startTime: start, endTime: start + 7200000,
+        }), 2, log, `Event "${ev.title}"`);
+        log(`✓ Event: "${ev.title}"`, 'log-ok');
+        mf.eventsDone = i + 1; saveState(); await sleep(320);
+      }
+      mf.steps.events = true; saveState();
+    } else { log('↷ Events already created — skipping', 'log-dim'); }
+
+    // ── Navigation ────────────────────────────────────────────
+    if (!mf.steps.nav) {
+      log('Configuring navigation order...', 'log-dim');
+      await apiPost(`${base}/updateAppsOrder`, h, {
+        scopeID: scopeId, 'appType[]': ['feeds','groups','task','manuals','events','blog'],
+      }).catch(() => {});
+      log('✓ Navigation set', 'log-ok');
+      mf.steps.nav = true; mf.navDone = true; saveState();
     }
 
-    const fullUrl = method === 'GET'
-      ? `${url}?${qs}`
-      : url;
+    Storage.clearManifest(scopeId);
 
-    const res = await fetch(fullUrl, {
-      method,
-      headers: {
-        ...headers,
-        ...(method !== 'GET' ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
-      },
-      ...(method !== 'GET' ? { body: qs.toString() } : {}),
+    return {
+      groups:   Object.keys(mf.groupIds),
+      posts:    mf.postsDone,
+      manualId: mf.manualId,
+      boardId:  mf.boardId,
+      tasks:    mf.tasksDone,
+      events:   mf.eventsDone,
+    };
+  }
+
+  /* ── Retry wrapper ── */
+  async function retry(fn, times, log, label) {
+    for (let i = 0; i <= times; i++) {
+      try { return await fn(); }
+      catch (e) {
+        if (i < times) {
+          log?.(`  ↺ Retry ${i+1}: ${label}`, 'log-dim');
+          await sleep(600 * (i + 1));
+        } else {
+          log?.(`  ⚠ ${label} failed after ${times+1} attempts: ${e.message}`, 'log-err');
+          return null;
+        }
+      }
+    }
+  }
+
+  /* ── API helper ── */
+  async function apiPost(url, headers, params) {
+    const body = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (Array.isArray(v)) v.forEach(i => body.append(k, i));
+      else body.append(k, v);
+    }
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
     });
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
   }
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  return { run };
+  return { run, estimateSeconds };
 })();
